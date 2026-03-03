@@ -1,5 +1,5 @@
 use accessibility_sys::{
-    AXUIElementRef, AXValueCreate, AXValueGetValue, kAXFloatingWindowSubrole, kAXPositionAttribute,
+    AXUIElementCreateApplication, AXUIElementRef, AXValueCreate, AXValueGetValue, kAXFloatingWindowSubrole, kAXPositionAttribute,
     kAXRaiseAction, kAXSizeAttribute, kAXStandardWindowSubrole, kAXUnknownSubrole,
     kAXValueTypeCGPoint, kAXValueTypeCGSize, kAXWindowRole,
 };
@@ -27,6 +27,34 @@ use crate::util::{AXUIAttributes, AXUIWrapper, MacResult};
 pub enum WindowPadding {
     Vertical(i32),
     Horizontal(i32),
+}
+
+/// Temporarily disables `AXEnhancedUserInterface` on an application to prevent window animations.
+/// This is necessary for browsers like Firefox and Chrome which animate window operations when
+/// this accessibility attribute is enabled.
+///
+/// Returns `Some((app_element, was_enabled))` if the attribute was successfully disabled,
+/// or `None` if the operation failed or the attribute was already disabled.
+fn disable_enhanced_ui(pid: Pid) -> Option<CFRetained<AXUIWrapper>> {
+    if pid == 0 {
+        return None;
+    }
+
+    let app_ref = unsafe { AXUIElementCreateApplication(pid) };
+    let app = AXUIWrapper::retain(app_ref).ok()?;
+
+    if let Ok(true) = app.enhanced_user_interface() {
+        let _ = app.set_enhanced_user_interface(false);
+        Some(app)
+    } else {
+        None
+    }
+}
+
+/// Re-enables `AXEnhancedUserInterface` on an application after window operations are complete.
+/// Should be called after `disable_enhanced_ui` if it returned `Some`.
+fn restore_enhanced_ui(app: &CFRetained<AXUIWrapper>) {
+    let _ = app.set_enhanced_user_interface(true);
 }
 
 pub trait WindowApi: Send + Sync {
@@ -292,6 +320,10 @@ impl WindowApi for WindowOS {
             trace!("already in position.");
             return;
         }
+
+        // Disable AXEnhancedUserInterface on the application to prevent animations
+        let app_element = self.pid().ok().and_then(disable_enhanced_ui);
+
         let mut point = CGPoint::new(
             f64::from(origin.x + self.horizontal_padding),
             f64::from(origin.y + self.vertical_padding),
@@ -314,6 +346,11 @@ impl WindowApi for WindowOS {
             self.frame.min = origin;
             self.frame.max = origin + size;
         }
+
+        // Re-enable AXEnhancedUserInterface if it was disabled
+        if let Some(app) = app_element {
+            restore_enhanced_ui(&app);
+        }
     }
 
     fn resize(&mut self, size: Size, display_width: i32) {
@@ -321,6 +358,10 @@ impl WindowApi for WindowOS {
             trace!("already correct size.");
             return;
         }
+
+        // Disable AXEnhancedUserInterface on the application to prevent animations
+        let app_element = self.pid().ok().and_then(disable_enhanced_ui);
+
         let width_padding = 2 * self.horizontal_padding;
         let height_padding = 2 * self.vertical_padding;
         let mut cgsize = CGSize::new(
@@ -343,6 +384,11 @@ impl WindowApi for WindowOS {
             };
             self.frame.max = self.frame.min + size;
             self.width_ratio = f64::from(self.frame.width()) / f64::from(display_width);
+        }
+
+        // Re-enable AXEnhancedUserInterface if it was disabled
+        if let Some(app) = app_element {
+            restore_enhanced_ui(&app);
         }
     }
 

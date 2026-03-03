@@ -6,7 +6,7 @@ use accessibility_sys::{
 use core::ptr::NonNull;
 use objc2_core_foundation::{
     CFArray, CFBoolean, CFNumber, CFNumberType, CFRetained, CFRunLoop, CFRunLoopMode,
-    CFRunLoopSource, CFString, CFType, Type, kCFTypeArrayCallBacks,
+    CFRunLoopSource, CFString, CFType, Type, kCFBooleanTrue, kCFBooleanFalse, kCFTypeArrayCallBacks,
 };
 use std::{
     ffi::{CStr, OsStr, c_int, c_void},
@@ -19,7 +19,7 @@ use tracing::debug;
 
 use crate::{
     errors::{Error, Result},
-    manager::{AXUIElementCopyAttributeValue, ax_window_id},
+    manager::{AXUIElementCopyAttributeValue, AXUIElementSetAttributeValue, ax_window_id},
     platform::{OSStatus, WinID},
 };
 
@@ -177,6 +177,14 @@ pub trait AXUIAttributes {
         Ok(array.to_vec())
     }
 
+    fn enhanced_user_interface(&self) -> Result<bool> {
+        let axname = CFString::from_str("AXEnhancedUserInterface");
+        self.get_attribute::<CFBoolean>(&axname)
+            .map(|value| CFBoolean::value(&value))
+    }
+
+    fn set_enhanced_user_interface(&self, enabled: bool) -> Result<()>;
+
     fn get_attribute<T: Type>(&self, name: &CFRetained<CFString>) -> Result<CFRetained<T>>;
 }
 
@@ -190,6 +198,23 @@ impl AXUIAttributes for CFRetained<AXUIWrapper> {
             .ok_or(Error::InvalidInput(format!(
                 "nullptr while getting attribute {name}.",
             )))
+    }
+
+    fn set_enhanced_user_interface(&self, enabled: bool) -> Result<()> {
+        let axname = CFString::from_str("AXEnhancedUserInterface");
+        unsafe {
+            let value = if enabled {
+                kCFBooleanTrue.unwrap()
+            } else {
+                kCFBooleanFalse.unwrap()
+            };
+            AXUIElementSetAttributeValue(
+                self.as_ptr(),
+                axname.as_ref(),
+                value as &CFType,
+            )
+        }
+        .to_result(function_name!())
     }
 }
 
