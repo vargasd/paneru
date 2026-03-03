@@ -29,7 +29,7 @@ pub use app::{Application, ApplicationApi};
 pub use display::Display;
 pub use layout::{Column, LayoutStrip};
 pub use process::{Process, ProcessApi};
-pub use skylight::AXUIElementCopyAttributeValue;
+pub use skylight::{AXUIElementCopyAttributeValue, AXUIElementSetAttributeValue};
 use skylight::{
     _AXUIElementCreateWithRemoteToken, SLSCopyActiveMenuBarDisplayIdentifier,
     SLSCopyAssociatedWindows, SLSCopyBestManagedDisplayForRect, SLSCopyManagedDisplayForWindow,
