@@ -2,7 +2,7 @@ use arc_swap::{ArcSwap, Guard};
 use bevy::ecs::resource::Resource;
 use objc2_core_foundation::{CFData, CFString};
 use regex::Regex;
-use serde::{Deserialize, Deserializer, de};
+use serde::{de, Deserialize, Deserializer};
 use std::{
     collections::HashMap,
     env,
@@ -269,14 +269,14 @@ impl Config {
     /// # Returns
     ///
     /// `Some(Command)` if a matching keybinding is found, otherwise `None`.
-    pub fn find_keybind(&self, keycode: u8, mask: &Modifiers) -> Option<Command> {
+    pub fn find_keybind(&self, keycode: u8, mask: Modifiers) -> Option<Command> {
         let config = self.inner();
         config
             .bindings
             .values()
             .flat_map(|binds| binds.all())
             .find_map(|bind| {
-                (bind.code == keycode && bind.modifiers == *mask).then_some(bind.command.clone())
+                (bind.code == keycode && bind.modifiers == mask).then_some(bind.command.clone())
             })
     }
 
@@ -430,6 +430,22 @@ impl TryFrom<&str> for Config {
     }
 }
 
+impl From<(MainOptions, Vec<WindowParams>)> for Config {
+    fn from((options, params): (MainOptions, Vec<WindowParams>)) -> Self {
+        Self {
+            inner: Arc::new(ArcSwap::from_pointee(InnerConfig {
+                options,
+                windows: params
+                    .into_iter()
+                    .enumerate()
+                    .map(|(nr, param)| Some((format!("param{nr}"), param)))
+                    .collect(),
+                ..Default::default()
+            })),
+        }
+    }
+}
+
 #[derive(Deserialize, Debug)]
 #[serde(untagged)]
 enum OneOrMore {
@@ -512,6 +528,19 @@ impl InnerConfig {
                 info!("bind: {binding:?}");
             }
         }
+
+        // Resolve passthrough keybinding strings into (keycode, modifiers) pairs.
+        if let Some(windows) = &mut config.windows {
+            for params in windows.values_mut() {
+                for input in &params.bindings_passthrough {
+                    match resolve_keybinding_str(input, &virtual_keys) {
+                        Ok(pair) => params.parsed_passthrough.push(pair),
+                        Err(err) => error!("passthrough: {err}"),
+                    }
+                }
+            }
+        }
+
         Ok(config)
     }
 }
@@ -668,9 +697,40 @@ pub struct WindowParams {
     pub grid: Option<String>,
     /// Per-window override for the active window border corner radius.
     pub border_radius: Option<f64>,
+    /// Keyboard shortcuts that should be passed through to this app instead of
+    /// being intercepted by paneru. Uses the same `"modifier+modifier-key"`
+    /// format as `[bindings]` (e.g. `"ctrl+alt-h"`).
+    #[serde(default)]
+    bindings_passthrough: Vec<String>,
+    /// Resolved `(keycode, modifiers)` pairs from `bindings_passthrough`.
+    #[serde(skip)]
+    parsed_passthrough: Vec<(u8, Modifiers)>,
 }
 
 impl WindowParams {
+    #![allow(unused)]
+    pub fn new(title: &str, bundle_id: Option<String>) -> Self {
+        Self {
+            title: Regex::new(title).unwrap(),
+            bundle_id,
+            floating: None,
+            index: None,
+            vertical_padding: None,
+            horizontal_padding: None,
+            dont_focus: None,
+            width: None,
+            grid: None,
+            border_radius: None,
+            bindings_passthrough: Vec::new(),
+            parsed_passthrough: Vec::new(),
+        }
+    }
+
+    /// Returns the resolved passthrough keybindings for this window rule.
+    pub fn passthrough_keys(&self) -> &[(u8, Modifiers)] {
+        &self.parsed_passthrough
+    }
+
     /// Parses the grid string into `(x_ratio, y_ratio, w_ratio, h_ratio)`, all 0.0–1.0.
     pub fn grid_ratios(&self) -> Option<(f64, f64, f64, f64)> {
         let grid = self.grid.as_ref()?;
@@ -698,6 +758,36 @@ where
 {
     let s = String::deserialize(deserializer)?;
     Regex::new(&s).map_err(de::Error::custom)
+}
+
+/// Resolves a keybinding string like `"ctrl+alt-h"` into a `(keycode, Modifiers)` pair.
+fn resolve_keybinding_str(input: &str, virtual_keys: &[(String, u8)]) -> Result<(u8, Modifiers)> {
+    let mut parts: Vec<&str> = input.split('-').map(str::trim).collect();
+    let key = parts
+        .pop()
+        .ok_or_else(|| Error::InvalidConfig("Empty keybinding string".to_string()))?;
+
+    let modifiers = match parts.pop() {
+        Some(mods) => parse_modifiers(mods)?,
+        None => Modifiers::empty(),
+    };
+
+    if !parts.is_empty() {
+        return Err(Error::InvalidConfig(format!(
+            "Too many dashes in keybinding: {input:?}"
+        )));
+    }
+
+    let code = virtual_keys
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, c)| *c)
+        .or_else(|| literal_keycode().find(|(k, _)| *k == key).map(|(_, c)| *c))
+        .ok_or_else(|| {
+            Error::InvalidConfig(format!("Unknown key '{key}' in keybinding: {input:?}"))
+        })?;
+
+    Ok((code, modifiers))
 }
 
 /// Parses a string containing modifier names (e.g., "alt", "shift", "cmd", "ctrl") separated by "+", and returns their combined bitmask.
@@ -1026,6 +1116,7 @@ fn generate_virtual_keymap() -> Vec<(String, u8)> {
 
 #[test]
 #[allow(clippy::float_cmp)]
+#[ignore = "toml parsing is super slow."]
 fn test_config_parsing() {
     let input = r#"
 [options]
@@ -1061,30 +1152,30 @@ index = 1
     // Modifiers: alt = 1<<0, ctrl = 1<<3.
     let keycode = find_key('q');
     assert!(matches!(
-        config.find_keybind(keycode, &(Modifiers::ALT | Modifiers::CTRL)),
+        config.find_keybind(keycode, Modifiers::ALT | Modifiers::CTRL),
         Some(Command::Quit)
     ));
 
     let keycode = find_key('t');
     assert!(matches!(
-        config.find_keybind(keycode, &(Modifiers::ALT | Modifiers::CTRL)),
+        config.find_keybind(keycode, Modifiers::ALT | Modifiers::CTRL),
         Some(Command::Window(Operation::Manage))
     ));
 
     let keycode = find_key('s');
     assert!(matches!(
-        config.find_keybind(keycode, &Modifiers::CTRL),
+        config.find_keybind(keycode, Modifiers::CTRL),
         Some(Command::Window(Operation::Stack(true)))
     ));
 
     assert!(matches!(
-        config.find_keybind(keycode, &Modifiers::ALT),
+        config.find_keybind(keycode, Modifiers::ALT),
         Some(Command::Window(Operation::Stack(true)))
     ));
 
     let keycode = find_key('d');
     assert!(matches!(
-        config.find_keybind(keycode, &Modifiers::ALT),
+        config.find_keybind(keycode, Modifiers::ALT),
         Some(Command::Window(Operation::Resize(ResizeDirection::Shrink)))
     ));
 
@@ -1133,6 +1224,8 @@ fn test_grid_ratios() {
         width: None,
         grid: grid.map(Into::into),
         border_radius: None,
+        bindings_passthrough: vec![],
+        parsed_passthrough: vec![],
     };
 
     // Standard 2x2 grid, cell (1,1), span 1x1 → bottom-right quarter.

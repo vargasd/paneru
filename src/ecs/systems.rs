@@ -1,5 +1,4 @@
 use bevy::app::AppExit;
-use bevy::ecs::change_detection::DetectChanges;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::message::{MessageReader, MessageWriter};
@@ -903,9 +902,14 @@ pub(super) fn swipe_idle_tracker(
             .unwrap_or(0)
     };
 
+    let swipe_direction_modifier = match config.swipe_gesture_direction() {
+        SwipeGestureDirection::Natural => 1.0,
+        SwipeGestureDirection::Reversed => -1.0,
+    };
+
     // Use the stored viewport_offset — deriving it from window positions
     // would give wrong results when edge windows have been sliver-clamped.
-    let shift = (display_width * frame_delta) as i32;
+    let shift = (display_width * frame_delta * swipe_direction_modifier) as i32;
     let new_offset = if config.continuous_swipe() {
         viewport_offset + shift
     } else {
@@ -1317,6 +1321,7 @@ fn move_display(
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn gather_initial_processes(
     receiver: Option<NonSendMut<Receiver<Event>>>,
+    mut displays: Query<&mut Display>,
     mut commands: Commands,
 ) {
     let Some(receiver) = receiver else {
@@ -1332,6 +1337,12 @@ pub(crate) fn gather_initial_processes(
                 initial_processes.push(Process::new(&psn, observer.clone()).into());
             }
             Event::InitialConfig(config) => {
+                // If there is a display menubar override, apply it to newly created displays.
+                let height = config.menubar_height();
+                for mut display in &mut displays {
+                    display.set_menubar_height_override(height);
+                }
+
                 initial_config = Some(config);
             }
             event => warn!("Stray event during initial process gathering: {event:?}"),
@@ -1381,17 +1392,6 @@ fn get_moving_window_frame(
         })
         .inspect_err(|err| warn!("can not get frame of {entity}: {err}"))
         .ok()
-}
-
-#[allow(clippy::needless_pass_by_value)]
-pub(super) fn sync_menubar_height(config: Res<Config>, mut displays: Query<&mut Display>) {
-    if !config.is_changed() {
-        return;
-    }
-    let height = config.menubar_height();
-    for mut display in &mut displays {
-        display.set_menubar_height_override(height);
-    }
 }
 
 fn get_display_height(active_display: &ActiveDisplay) -> i32 {
